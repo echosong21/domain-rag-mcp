@@ -7,11 +7,16 @@
 name: dev-agent
 description: 开发与调试用，可访问全部通用能力（含写操作与评测）
 
-# 初始授予：比健康 Agent 多一个 common.ops.read
+# 初始授予：比健康 Agent 多 common.ops.write（健康 Agent 永远拿不到写权限）
+#
+# ⚠️ 这里必须是「健康 Agent 初始集的超集」—— 开发 profile 的权限若反而更小，
+# 就说明配置写错了（第一版就漏了 common.safety，导致 dev 反而看不到安全闸工具）。
 initial_scopes:
   - common.discovery
   - common.knowledge
+  - common.safety
   - common.ops.read
+  - common.ops.write
 
 allow_discovery: true
 

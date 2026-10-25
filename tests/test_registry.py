@@ -47,7 +47,7 @@ def test_real_registry_loads():
     """仓库里的 registry.yaml 必须能加载，且有 2 个核心工具。"""
     registry, handlers = build_registry()
 
-    assert len(registry.tools) == 2
+    assert len(registry.tools) == 7
     assert "common.discovery.list_domains" in registry.tools
     assert "common.discovery.health_check" in registry.tools
     # handler 必须真能解析到可调用对象

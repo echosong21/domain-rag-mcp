@@ -42,6 +42,63 @@ tools:
     requires: [milvus, embedding]
     batch: core
 
+  # ── 运维：索引状态（只读）────────────────────────────────
+  - name: common.ops.get_index_status
+    module: tools.common.ops
+    handler: get_index_status
+    brief: 查询某集合的行数、索引类型与状态
+    scope: common.ops.read
+    tags: [索引, 状态, 行数, index, status, rows, collection]
+    side_effect: read
+    requires: [milvus]
+    batch: core
+
+  # ── 运维：重建索引（唯一写工具）──────────────────────────
+  #
+  # ⚠️ 三重限制：需 common.ops.write（health-agent 没有）/ 默认 dry_run /
+  # 写工具不允许配 fallback（registry 加载期强制）。
+  - name: common.ops.reindex
+    module: tools.common.ops
+    handler: reindex
+    brief: 重建某领域的索引；默认只预演，需显式传 dry_run=false 才真的执行
+    scope: common.ops.write
+    tags: [重建, 索引, 建库, reindex, rebuild, index]
+    side_effect: write
+    requires: [milvus, embedding]
+    batch: core
+
+  # ── 安全：规则透明化 ─────────────────────────────────────
+  - name: common.safety.get_rules
+    module: tools.common.safety
+    handler: get_rules
+    brief: 返回该领域的禁止断言、免责声明、计划变动上限与急症信号
+    scope: common.safety
+    tags: [安全, 规则, 边界, safety, rules, policy]
+    side_effect: read
+    batch: core
+
+  # ── 安全：输入闸 ─────────────────────────────────────────
+  - name: common.safety.check_input
+    module: tools.common.safety
+    handler: check_input
+    brief: 检查用户输入是否需转介急症，或触及禁止断言
+    scope: common.safety
+    tags: [安全, 输入, 急症, 转介, safety, input, check]
+    side_effect: read
+    batch: core
+
+  # ── 安全：输出闸 ─────────────────────────────────────────
+  #
+  # 命中禁止断言时**整条拒答、不改写** —— 改写等于把不安全内容重新交给模型生成。
+  - name: common.safety.check_output
+    module: tools.common.safety
+    handler: check_output
+    brief: 检查生成的回答是否含禁止断言；命中则整条拒答（不改写）
+    scope: common.safety
+    tags: [安全, 输出, 断言, safety, output, check, guard]
+    side_effect: read
+    batch: core
+
 # ── Step 1 未配置的部分（Step 4–6 逐批加）─────────────────
 #
 # 完整清单见架构文档 §一：17 个工具 = 12 核心 + 5 扩展。
