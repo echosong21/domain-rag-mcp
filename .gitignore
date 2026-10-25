@@ -1,0 +1,38 @@
+# ── Python ──────────────────────────────
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+*.egg-info/
+build/
+dist/
+
+# ── 测试 ─────────────────────────────────
+.pytest_tmp/
+pytest-cache-files-*/
+.pytest_cache/
+.coverage
+htmlcov/
+
+# ── 运行产物 ─────────────────────────────
+logs/
+*.log
+*.jsonl
+
+# ── 密钥（务必不要提交）──────────────────
+.env
+*.env
+!example.env
+*.pem
+*.key
+
+# ── IDE / OS ─────────────────────────────
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+
+# ── 本地数据（语料与索引不进仓）──────────
+data/
+corpus/

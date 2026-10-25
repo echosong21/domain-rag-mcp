@@ -1,0 +1,26 @@
+[project]
+name = "domain-rag-mcp"
+version = "0.1.0"
+description = "把领域可配置的 RAG 检索能力包装成标准 MCP 工具"
+requires-python = ">=3.11"
+dependencies = [
+    "fastmcp>=4.0",
+    "pyyaml>=6.0",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0"]
+
+# ⚠️ 刻意不在这里声明 milvus / langchain 等重型依赖 —— 
+# 工具层通过 `requires` 字段声明需要哪些能力，
+# 由部署环境按需安装。否则「只想测披露逻辑」的人也得装一整套检索栈。
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+testpaths = ["tests"]
+# 与本机 %TEMP% 的 ACL 限制无关：pytest 的临时目录若不可用，
+# 用 `--basetemp` 覆盖，而不是把绝对路径写死在这里。
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"

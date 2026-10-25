@@ -1,0 +1,39 @@
+# 健康 Agent 的授权声明
+#
+# 接入一个新 Agent = 写一个这样的 yaml。核心代码不动。
+#
+# `initial_scopes` 决定「首次 tools/list 返回哪些工具」——
+# 它是授权（scope）而不是会话状态，因为规范 2026-07-28 已移除协议级 session，
+# 且明确允许 `tools/list` 因授权不同而不同。
+
+name: health-agent
+description: 健康行动计划助手（自有产品，不对外服务）
+
+# ── 初始授予：连接后 Agent 立刻能看到并用这些 scope 下的工具 ──
+initial_scopes:
+  - common.discovery      # 领域发现 / 健康检查
+  - common.knowledge      # 检索（含深度检索与其降级）
+  - common.safety         # 安全闸
+  - common.ops.read       # 索引状态 / 成本估算（只读）
+
+# ── 渐进披露：能否在运行时申请更多 scope ──────────────────
+allow_discovery: true
+
+# 可搜索的 scope 范围。⚠️ 必须与 initial_scopes 一致或为其超集；
+# 这里刻意不含 common.ops.write / dev.* ——
+# 健康 Agent 不该能搜到「重建索引」和「开发期评测」，
+# 否则即使调不动，也会把 Agent 引向无用的尝试。
+discovery_scopes:
+  - common.discovery
+  - common.knowledge
+  - common.safety
+  - common.ops.read
+
+# ── 数据边界 ──────────────────────────────────────────────
+allowed_domains:
+  - health
+
+# ── 写操作 ────────────────────────────────────────────────
+# false ⇒ 即使通过某种方式拿到了 common.ops.write，reindex 也会被拒。
+# 双重保险：scope 过滤 + 这个开关。
+allow_ops_write: false

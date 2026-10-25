@@ -1,0 +1,35 @@
+# 开发 / 调试用 profile —— 权限明显大于健康 Agent
+#
+# 它存在的意义不只是"自己方便"：**它证明权限矩阵真的在起作用**。
+# 同一个 MCP server，换一个 profile 就得到不同的可见工具集 ——
+# 这是"多 Agent 隔离"最直接的证据。
+
+name: dev-agent
+description: 开发与调试用，可访问全部通用能力（含写操作与评测）
+
+# 初始授予：比健康 Agent 多一个 common.ops.read
+initial_scopes:
+  - common.discovery
+  - common.knowledge
+  - common.ops.read
+
+allow_discovery: true
+
+# 可发现范围：全部 scope（含写与 dev.*）
+# ⚠️ 与 health-agent 的差异就在这里 —— 健康 Agent 搜不到 dev.eval，
+# 也搜不到 common.ops.write，因此它不可能通过 enable_tool 提权。
+discovery_scopes:
+  - common.discovery
+  - common.knowledge
+  - common.safety
+  - common.ops.read
+  - common.ops.write
+  - dev.eval
+  - dev.feedback
+
+allowed_domains:
+  - health
+  - law
+
+# 允许写操作（reindex）—— 健康 Agent 这里是 false
+allow_ops_write: true

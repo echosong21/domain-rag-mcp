@@ -1,0 +1,63 @@
+# 工具注册表 —— 唯一事实源
+#
+# 加一个工具 = 这里加一段 + 新建一个 py 文件。核心代码不动。
+#
+# `scope` 是权限单位：profile 通过「授予 scope」获得工具。
+# `fallback` 是降级链：只允许**同权限域内**（common.* 只能降到 common.*）。
+# `requires` 用于 health_check 报告降级，也用于熔断器分区。
+version: 1
+
+# 已知权限域。每个工具必须声明自己属于哪个；未声明的 scope 会让启动失败。
+scopes:
+  - common.discovery
+  - common.knowledge
+  - common.safety
+  - common.ops.read
+  - common.ops.write
+  - dev.eval
+  - dev.feedback
+
+tools:
+  # ── 第 1 个：领域发现 ─────────────────────────────────────
+  - name: common.discovery.list_domains
+    module: tools.common.discovery.list_domains
+    handler: list_domains
+    brief: 列出可用的知识领域，含每种的检索形态与集合名
+    scope: common.discovery
+    tags: [领域, 列表, domain, list, discover, 发现]
+    side_effect: read
+    batch: core
+
+  # ── 第 2 个：依赖探活 ─────────────────────────────────────
+  #
+  # 这个工具必须存在，理由见 health_check.py 的模块 docstring：
+  # 没有它，Agent 只能靠「调用超时」发现后端不可用。
+  - name: common.discovery.health_check
+    module: tools.common.discovery.health_check
+    handler: health_check
+    brief: 检查向量库 / embedding / 重排服务与熔断器的当前状态
+    scope: common.discovery
+    tags: [健康, 探活, 状态, health, status, check, probe]
+    side_effect: read
+    requires: [milvus, embedding]
+    batch: core
+
+# ── Step 1 未配置的部分（Step 4–6 逐批加）─────────────────
+#
+# 完整清单见架构文档 §一：17 个工具 = 12 核心 + 5 扩展。
+# 下面只列出「已设计但未落地」的，防止以后忘记：
+#
+#   common.knowledge.search          fallback: []
+#   common.knowledge.deep_search     fallback: [common.knowledge.search]   ← 降级示例
+#   common.knowledge.get_chunk
+#   common.safety.check_input
+#   common.safety.check_output
+#   common.safety.get_rules
+#   common.ops.get_index_status
+#   common.ops.estimate_cost
+#   common.ops.reindex               side_effect: write（不允许 fallback）
+#   common.discovery.describe_corpus
+#   common.discovery.list_sources
+#   dev.eval.run_query_eval
+#   dev.eval.get_report
+#   dev.feedback.record
