@@ -1,12 +1,15 @@
 """domain-rag-mcp —— 把领域可配置的 RAG 能力暴露成标准 MCP 工具。
 
-**当前阶段：Step 2（披露层已接线）**
+**已接通**
 
-已接通：
 - registry 装配（8 类启动校验）
 - **principal / scope 披露**：只把「已授予 scope」的工具加入可见列表
 - 两个元工具：`meta.search_tools` / `meta.enable_tool`
 - `enable_tool` 成功后动态 `enable()` 对应工具，并自动发 `tools/list_changed`
+- 工具实现：discovery / knowledge / safety / ops 四组，共 7 个
+- 降级与熔断（`resilience/`）
+- 审计与指标（`observability/`）
+- stdio 与 http 两种传输（`transport/`）
 
 **关键设计：`enable` 是授予 scope，不是改会话状态**
 
@@ -14,7 +17,8 @@ MCP 2026-07-28 移除了协议级 session，且规定 `tools/list` 不得随连�
 （但可因授权不同而不同）。所以「已披露工具」= 「已授予 scope 的工具」，
 状态按 principal 存。
 
-**尚未接通**：Step 3 降级+熔断、Step 4-5 真实检索工具、Step 5 审计。
+⚠️ 本 docstring 曾长期停留在「Step 2（披露层已接线）」，与实际代码脱节 ——
+工具与降级/审计都已落地。2026-11-05 按实测更新。
 """
 from __future__ import annotations
 
