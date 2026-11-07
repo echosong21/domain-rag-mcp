@@ -77,6 +77,28 @@ tools:
     requires: [milvus, embedding]
     batch: core
 
+  # ── 检索 + 生成 + 安全闸 ─────────────────────────────────
+  #
+  # ⚠️ 这个工具的关键不是"能生成"，是**它内建了安全闸**。
+  #    如果只暴露检索，每个调用方都要自己实现「拼 prompt → 调模型 → 过安全闸」，
+  #    而安全闸漏掉的后果是输出像医嘱的内容 —— 这件事该由能力层做一次。
+  #
+  # ⚠️ 它**不带记忆**（无状态）：MCP 2026-07-28 已移除协议级 session，
+  #    在工具里做会话状态与协议方向相反。多轮记忆由调用方自己整理进 question。
+  #
+  # ⚠️ 返回里 `blocked` 与 `error` 是两件事：
+  #    error   = 系统坏了（Milvus / LLM 不可用）⇒ 重试或报障
+  #    blocked = 系统正常但内容越界 ⇒ 换说法问，重试无用
+  - name: common.knowledge.answer
+    module: tools.common.knowledge
+    handler: answer
+    brief: 检索 + 生成 + 安全闸一体的回答；命中禁用断言则整条拒答（不改写）
+    scope: common.knowledge
+    tags: [回答, 生成, 问答, answer, generate, rag, 安全闸, safety]
+    side_effect: read
+    requires: [milvus, embedding, llm]
+    batch: core
+
   # ── 运维：索引状态（只读）────────────────────────────────
   - name: common.ops.get_index_status
     module: tools.common.ops

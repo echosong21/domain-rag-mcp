@@ -467,3 +467,234 @@ def search_multi(
         "fuse_ms": fuse_ms,
         "stage_ms": {"embed": embed_ms, "wall": wall_ms, "fuse": fuse_ms},
     }
+
+
+# ════════════════════════════════════════════════════════════
+# 检索 + 生成 + 安全闸
+# ════════════════════════════════════════════════════════════
+
+DEFAULT_ANSWER_TOP_K = 3
+
+
+# ── 安全闸 ──────────────────────────────────────────────────
+def _check_output(text: str, cfg: dict) -> dict:
+    """检查回答是否含禁用断言。
+
+    **命中即整条拒答，不改写** —— 改写会引入新的、未经验证的表达，
+    而拒答是确定性的。这个取舍在健康/法律这类领域没有讨论空间。
+
+    判定方式是**子串匹配**（`claim in text`），刻意不用模型判：
+    模型判会引入不确定性，而这条闸门存在的意义就是确定性。
+    代价是可能误伤（如「不是可以治愈的」也会命中），
+    **宁可误伤也不放过** —— 误伤时调用方得到明确拦截，漏放则可能输出越界内容。
+    """
+    claims = (cfg.get("safety") or {}).get("forbidden_claims") or []
+    hits = [c for c in claims if c and c in text]
+    if hits:
+        return {
+            "allowed": False,
+            "action": "block",
+            "matched": hits,
+            "reasons": [f"命中禁用断言：{'、'.join(hits)}"],
+            "message": "该回答涉及超出安全边界的表述，已被拦截。请以专业医疗意见为准。",
+        }
+    return {"allowed": True, "action": "allow", "matched": [], "reasons": []}
+
+
+def _apply_disclaimers(text: str, cfg: dict) -> str:
+    """按 `disclaimers` 的 position 注入免责声明。
+
+    `prepend` 在前、`append` 在后；**顺序按配置里的出现顺序**，
+    因为多条同位置的声明有优先级（越靠前越重要）。
+    """
+    items = cfg.get("disclaimers") or []
+    before = [d.get("text") for d in items
+              if isinstance(d, dict) and d.get("position") == "prepend" and d.get("text")]
+    after = [d.get("text") for d in items
+             if isinstance(d, dict) and d.get("position") == "append" and d.get("text")]
+
+    parts = [*before, text, *after]
+    return "\n\n".join(p for p in parts if p)
+
+
+# ── prompt 组装 ─────────────────────────────────────────────
+def _build_messages(question: str, hits: list[dict], cfg: dict) -> list[dict]:
+    """组装 messages。
+
+    **材料编号后拼在 user 消息里，不放 system**：system 是能力约束（每领域固定），
+    材料是本次请求的内容。混在一起会让「改 prompt」和「改材料」纠缠不清。
+
+    `no_answer` 占位符从配置里替换 —— 领域不同，兜底措辞也不同
+    （健康是「材料中未提及」，法律可能是「现有材料不足以判断」）。
+    """
+    prompt_cfg = cfg.get("prompt") or {}
+    no_answer = prompt_cfg.get("no_answer") or "材料中未提及"
+    system = (prompt_cfg.get("system") or "").replace("{no_answer}", no_answer)
+
+    blocks = [
+        f"【材料{i}】来源：{h.get('source')}#{h.get('chunk_index')}\n{h.get('text')}"
+        for i, h in enumerate(hits, start=1)
+    ]
+    user = "材料：\n" + "\n\n".join(blocks) + f"\n\n问题：{question}"
+
+    messages = []
+    if system.strip():
+        messages.append({"role": "system", "content": system})
+    messages.append({"role": "user", "content": user})
+    return messages
+
+
+def _llm_client():
+    """建 LLM 客户端。返回 `(client, error)`。
+
+    配置键与 embedding 分开（`MODEL` / `BASE_URL` vs `EMBED_MODEL` / `EMBED_BASE_URL`）：
+    生成和向量化通常是不同的模型、不同的端点，复用一套配置会让换模型时互相牵连。
+    """
+    api_key = os.getenv("API_KEY") or os.getenv("DASHSCOPE_API_KEY")
+    base_url = os.getenv("BASE_URL")
+    model = os.getenv("MODEL")
+
+    missing = [
+        name
+        for name, val in (("API_KEY", api_key), ("BASE_URL", base_url), ("MODEL", model))
+        if not val
+    ]
+    if missing:
+        return None, f"LLM 配置缺失：{', '.join(missing)}"
+
+    try:
+        # 函数内导入：没装 langchain 也能导入本模块（含测试）
+        from langchain_openai import ChatOpenAI
+    except ImportError:
+        return None, 'langchain-openai 未安装（pip install -e ".[retrieval]"）'
+
+    try:
+        return ChatOpenAI(
+            model=model,
+            # 与检索仓一致：有些部署把完整路径写进 BASE_URL，这里容错
+            base_url=base_url.removesuffix("/chat/completions"),
+            api_key=api_key,
+        ), None
+    except Exception as exc:  # noqa: BLE001
+        return None, f"LLM 客户端初始化失败：{type(exc).__name__}: {exc}"
+
+
+def answer(
+    question: str,
+    domain: str | None = None,
+    top_k: int = DEFAULT_ANSWER_TOP_K,
+    min_score: float = 0.0,
+    milvus_url: str | None = None,
+) -> dict:
+    """检索 + 生成 + 安全闸一体。回答严格基于检索到的材料。
+
+    **为什么这个工具存在**：如果只给 `search`，每个调用方都要自己实现
+    「拼 prompt → 调模型 → 过安全闸」三段。安全闸尤其危险 —— 漏了它，
+    健康领域就会输出像医嘱的内容。**这件事该由能力层做一次，而不是每个调用方各做一遍。**
+
+    **不带记忆（无状态）**：MCP 2026-07-28 已移除协议级 session，在工具里做会话状态
+    与协议方向相反。需要多轮记忆时由调用方（业务层）自己管，把历史整理进 question。
+
+    Args:
+        question: 用户问题。
+        domain: 领域配置名，**必填**。
+        top_k: 送入模型的材料条数，1–20。
+        min_score: 材料相似度下限。
+        milvus_url: 覆盖 `MILVUS_URL`。
+
+    Returns:
+        成功：`{"answer": str, "contexts": [...], "safety": {...}, "usage": {...},
+                "stage_ms": {...}, "domain": str, "collection": str}`
+        **安全拦截**：`{"blocked": True, "answer": str, "safety": {...}, ...}`
+        系统故障：`{"error": str}`
+
+    ⚠️ **`blocked` 与 `error` 是两件事，调用方必须分开处理**：
+        - `error` = 系统坏了（Milvus / LLM 不可用）⇒ 该重试或报障
+        - `blocked` = 系统正常，但内容越界 ⇒ 该换说法问，重试无用
+    """
+    if not isinstance(question, str) or not question.strip():
+        return {"error": "question 不能为空"}
+    if len(question) > 2000:
+        return {"error": f"question 过长（{len(question)} > 2000 字符）"}
+    if not isinstance(top_k, int) or isinstance(top_k, bool):
+        return {"error": "top_k 必须是整数"}
+    if not 1 <= top_k <= MAX_TOP_K:
+        return {"error": f"top_k 超出范围（1–{MAX_TOP_K}）"}
+
+    cfg, err = _load_domain(domain)
+    if err:
+        return {"error": err}
+
+    # ① 检索（复用 search，避免两套检索逻辑）
+    retrieved = search(question, domain=domain, top_k=top_k,
+                       min_score=min_score, milvus_url=milvus_url)
+    if "error" in retrieved:
+        return retrieved
+
+    hits = retrieved["hits"]
+    no_answer = (cfg.get("prompt") or {}).get("no_answer") or "材料中未提及"
+
+    # ② 没检索到材料就不调模型 —— 省一次必然无用且昂贵的调用
+    if not hits:
+        return {
+            "answer": _apply_disclaimers(no_answer, cfg),
+            "contexts": [],
+            "safety": {"input": {"allowed": True}, "output": {"allowed": True}},
+            "usage": {"input_tokens": 0, "output_tokens": 0},
+            "skipped_generation": "no_context",
+            "domain": retrieved["domain"],
+            "collection": retrieved["collection"],
+            "stage_ms": {"retrieve": retrieved["stage_ms"], "generate": 0.0},
+        }
+
+    # ③ 生成
+    llm, err = _llm_client()
+    if err:
+        return {"error": err}
+
+    messages = _build_messages(question.strip(), hits, cfg)
+
+    t0 = time.perf_counter()
+    try:
+        resp = llm.invoke(messages)
+    except Exception as exc:  # noqa: BLE001
+        return {"error": f"LLM 调用失败：{type(exc).__name__}: {exc}"}
+    generate_ms = round((time.perf_counter() - t0) * 1000, 1)
+
+    raw = getattr(resp, "content", None)
+    if not isinstance(raw, str):
+        raw = str(raw or "")
+    raw = raw.strip()
+
+    # ④ 安全闸：命中就整条拒答，不改写
+    verdict = _check_output(raw, cfg)
+    usage = getattr(resp, "usage_metadata", None) or {}
+    usage_out = {
+        "input_tokens": usage.get("input_tokens"),
+        "output_tokens": usage.get("output_tokens"),
+    }
+
+    if not verdict["allowed"]:
+        return {
+            "blocked": True,
+            "answer": _apply_disclaimers(verdict["message"], cfg),
+            # 原始回答**不返回**给调用方 —— 否则拦截形同虚设
+            "contexts": hits,
+            "safety": {"input": {"allowed": True}, "output": verdict},
+            "usage": usage_out,
+            "domain": retrieved["domain"],
+            "collection": retrieved["collection"],
+            "stage_ms": {
+                "retrieve": retrieved["stage_ms"], "generate": generate_ms,
+            },
+        }
+
+    return {
+        "answer": _apply_disclaimers(raw, cfg),
+        "contexts": hits,
+        "safety": {"input": {"allowed": True}, "output": verdict},
+        "usage": usage_out,
+        "domain": retrieved["domain"],
+        "collection": retrieved["collection"],
+        "stage_ms": {"retrieve": retrieved["stage_ms"], "generate": generate_ms},
+    }
