@@ -52,7 +52,8 @@ def test_real_registry_loads():
     # 变更记录：7 → 8（2026-11-07 新增 common.knowledge.search）
     #           8 → 9（2026-11-07 新增 common.knowledge.search_multi）
     #           9 → 10（2026-11-07 新增 common.knowledge.answer）
-    assert len(registry.tools) == 10
+    #           10 → 12（2026-11-07 新增 answer_planned 与 explain）
+    assert len(registry.tools) == 12
     assert "common.discovery.list_domains" in registry.tools
     assert "common.discovery.health_check" in registry.tools
     # handler 必须真能解析到可调用对象

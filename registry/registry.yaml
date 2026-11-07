@@ -99,6 +99,43 @@ tools:
     requires: [milvus, embedding, llm]
     batch: core
 
+  # ── 多焦点问题的回答 ─────────────────────────────────────
+  #
+  # 单轮检索对多焦点问题只能命中一半，**而且回答读起来是通顺的** ——
+  # 调用方看不出它只答了一半。这是最危险的失败模式：错得不明显。
+  #
+  # ⚠️ 它比"直接调 answer"多返回 `empty_subtasks`，让调用方能区分
+  #    「整体没查到」和「其中一半没查到」。没有它，部分失败会被完全掩盖。
+  - name: common.knowledge.answer_planned
+    module: tools.common.knowledge
+    handler: answer_planned
+    brief: 先判断是否多焦点，是则拆子任务分别检索再融合生成（返回子任务明细）
+    scope: common.knowledge
+    tags: [多焦点, 拆分, 规划, planned, subtask, decompose, 复合问题]
+    side_effect: read
+    requires: [milvus, embedding, llm]
+    batch: core
+
+  # ── 可解释性：一次检索的决策过程 ─────────────────────────
+  #
+  # 答错了要能定位是三种里的哪一种：「没召回」「召回但排序低」「模型没用上」。
+  # 三种修法完全不同 —— 第一种动语料，第二种动融合，第三种动 prompt。
+  #
+  # ⚠️ 它不生成回答（不需要 llm），`explanation` 字段是**规则生成**的，
+  #    不是模型写的 —— 解释要确定性、可复现。
+  #
+  # ⚠️ 与 trace 的分工：explain 答「现在为什么召回这条」（可重跑）；
+  #    trace 答「当时为什么答错了」（不可重跑，只能读日志）。
+  - name: common.knowledge.explain
+    module: tools.common.knowledge
+    handler: explain
+    brief: 解释一次检索的决策：拆了哪些子任务、每路召回什么、融合后谁被顶上来
+    scope: common.knowledge
+    tags: [解释, 归因, 可解释, explain, debug, trace, 决策, ranks]
+    side_effect: read
+    requires: [milvus, embedding]
+    batch: core
+
   # ── 运维：索引状态（只读）────────────────────────────────
   - name: common.ops.get_index_status
     module: tools.common.ops
