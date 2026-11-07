@@ -123,6 +123,27 @@ pip install -e ".[dev]"
 ⚠️ **刻意不声明 Milvus / LangChain 等重型依赖**。工具层通过 `requires` 字段声明
 需要哪些能力，由部署环境按需安装 —— 否则「只想看披露逻辑」的人也得装一整套检索栈。
 
+检索类工具（`common.knowledge.*`）另需一组依赖：
+
+```bash
+pip install -e ".[retrieval]"
+```
+
+依赖引入方式是**函数内导入 + extras 声明**：工具模块里 `from pymilvus import ...`
+写在函数体内，所以模块与它的测试在没装检索栈时也能导入。
+
+### 领域配置在自己仓里
+
+```
+domain-rag-mcp/domains/{health,law}.yaml
+```
+
+领域配置描述的是「哪些集合、哪些形态、什么 prompt」，**它是工具层的能力声明，
+不属于任何一个业务系统**。所以它随本仓走，不再靠环境变量指向别的仓库。
+
+需要多套配置时用 `DOMAIN_RAG_DOMAINS_DIR` 覆盖；**显式配置但路径无效会直接报错，
+不会静默回退到仓里那份** —— 静默回退会让人以为用的是新配置。
+
 ### 跑起来
 
 ```bash

@@ -1,0 +1,82 @@
+# 健康领域配置（EchoHealth）
+#
+# ⚠️ 定位：本文件用于**证明"配置可驱动检索链路"**，不追求健康领域完整。
+#    健康语料属后续规划。
+#
+# ⚠️ 与能力层的边界：
+#    - 这里只有"领域知识"（形态名/提示词/免责声明/安全规则）
+#    - 模型、端点、密钥、Milvus 地址**都不在这里**（它们属 .env 部署环境）
+
+domain:
+  key: health
+  display_name: EchoHealth
+  language: zh
+  description: >
+    在明确的安全边界内，为个人动态重排每日健康行动计划。
+
+# 形态：健康的"数据形态"与法律不同 —— 这是换领域时**必改**的部分
+forms:
+  - key: guides
+    label: 健康指南
+    role: 权威依据（饮食/运动/作息的通用原则）
+  - key: faq
+    label: 常见问答
+    role: 直接答案
+  - key: dialogues
+    label: 用户记录
+    role: 用户的真实说法与约束
+  - key: tables
+    label: 结构化记录
+    role: 数值（热量/营养素/体重等）
+
+collection: echo_health_v2
+
+corpus:
+  root: ./corpus
+  chunk_size: 600
+  chunk_overlap: 80
+  per_form_limit:
+    # 每形态「文件数」上限（不是块数）。null = 不截断，全量入索引。
+    # 依据：tables 每份仅 20–40 行，全进也无妨；dialogues 单份较长，限量以控制块数。
+    tables: null
+    dialogues: 60
+
+prompt:
+  system: |
+    只依据下面材料回答问题；材料中没有的信息就回答"{no_answer}"。
+    不做医疗诊断，不给用药剂量建议。
+    【例外 · 用户自述】若上文标有「用户自述」的对话历史里出现用户本人的条件
+    （过敏、忌口、慢性病、饮食目标等），这属于**问题条件**而非**待查知识**：
+    可用它来理解问题、判断建议是否适用、以及标注"这条建议与您提到的情况可能冲突"，
+    但**不要**把它当作可引用的材料来源，也不要据此编造材料里没有的营养数值。
+    如果材料里只有同一食材的多个变体（例如只有「甜玉米 / 糯玉米 / 煮玉米」而没有单写「玉米」），
+    不要答"{no_answer}"：按热量从低到高列出 2–3 个主要变体，每种一行、格式为「名称 数值 千卡」，
+    最后一行写「常见的是：<名称>」。不要比较营养结构，不要解释推理过程。
+    营养数值一律按每 100 克可食部回答，并保留材料里对生 / 熟 / 干状态的限定语。
+  no_answer: 材料中未提及
+
+# 免责声明：**强制注入**；能力层不允许省略
+disclaimers:
+  - text: 本内容仅供健康行动参考，不构成医疗诊断或治疗建议。
+    position: prepend
+  - text: 如出现不适或异常指标，请及时就医。
+    position: append
+
+# 安全规则：P2 才实现，P1 只保证可读出
+safety:
+  forbidden_claims:
+    - 可以治愈
+    - 替代药物
+    - 无需就医
+  must_refer:
+    - when: 提到胸痛、呼吸困难、意识改变
+      action: 建议立即就医
+  max_plan_delta_per_day: 2
+  scope_note: 不处理急症，不做用药剂量建议
+
+eval:
+  golden: evals/golden_questions.json
+  metrics_extra:
+    - 热量误差
+    - 过敏原漏报
+    - 禁忌命中

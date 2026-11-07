@@ -18,6 +18,8 @@
 """
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
 from tools.common import knowledge
@@ -85,10 +87,26 @@ def test_bool_top_k_is_rejected(domains_dir):
 
 
 # ── 领域配置缺失 ────────────────────────────────────────────
-def test_missing_domains_dir_mentions_env_var(monkeypatch):
-    """目录没配时，错误要指名是哪个环境变量。"""
+def test_bundled_domains_used_when_env_absent(monkeypatch):
+    """不设环境变量时用仓里自带的 `domains/` —— 这是「工具层自包含」的关键。
+
+    早先靠环境变量指向某个业务仓的 domains，等于让通用层反向依赖业务仓。
+    """
     monkeypatch.delenv(knowledge.ENV_DOMAINS_DIR, raising=False)
+    d = knowledge._domains_dir()
+    assert d is not None and d.is_dir()
+    assert list(d.glob("*.yaml")), "自带的 domains/ 里应当至少有一个 yaml"
+
+
+def test_explicit_but_invalid_domains_dir_errors(monkeypatch):
+    """显式配了无效路径时必须报错并指名变量，**不静默回退到自带的那份**。
+
+    静默回退会让人以为「用的是配的那份」，实际用的是仓里那份可能过期的 ——
+    这类问题比直接报错难查得多。
+    """
+    monkeypatch.setenv(knowledge.ENV_DOMAINS_DIR, str(Path("/nonexistent-xyz")))
     out = knowledge.search(query="ok", domain="health")
+    assert "error" in out
     assert knowledge.ENV_DOMAINS_DIR in out["error"]
 
 

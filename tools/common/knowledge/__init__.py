@@ -38,6 +38,10 @@ import yaml
 ENV_DOMAINS_DIR = "DOMAIN_RAG_DOMAINS_DIR"
 ENV_MILVUS_URL = "MILVUS_URL"
 
+# 本仓自带的领域配置目录。
+# `tools/common/knowledge/__init__.py` 上溯三层 = 仓库根，再下到 `domains/`。
+_BUNDLED_DOMAINS = Path(__file__).resolve().parents[3] / "domains"
+
 # 与检索仓保持一致的默认值，避免「同一个查询在两个入口得到不同上限」
 DEFAULT_TOP_K = 5
 MAX_TOP_K = 20
@@ -45,11 +49,24 @@ MAX_TOP_K = 20
 
 # ── 领域配置 ────────────────────────────────────────────────
 def _domains_dir() -> Path | None:
+    """定位 `domains/` 目录。
+
+    **优先级**：环境变量 `DOMAIN_RAG_DOMAINS_DIR` → 本仓自带的 `domains/`。
+
+    **为什么默认读自己仓**：领域配置是「工具层的能力声明」，不属于任何一个业务。
+    早先的做法是靠环境变量指向某个业务仓的 `domains/`，后果是
+    「部署工具层还得连带业务仓的配置」—— 那就是配置层面的反向依赖。
+    现在自带一份，环境变量只在「多套配置 / 多集群」时才需要。
+
+    ⚠️ **显式配了但路径无效时返回 None（报错），不静默回退到自带**：
+    运维把路径写错时，静默回退会让人以为「用的是新配置」，
+    实际用的是仓里那份可能已经过期的 —— 这类问题比直接报错难查得多。
+    """
     raw = os.getenv(ENV_DOMAINS_DIR)
-    if not raw:
-        return None
-    path = Path(raw).expanduser()
-    return path if path.is_dir() else None
+    if raw:
+        path = Path(raw).expanduser()
+        return path if path.is_dir() else None
+    return _BUNDLED_DOMAINS if _BUNDLED_DOMAINS.is_dir() else None
 
 
 def _load_domain(key: str | None) -> tuple[dict | None, str | None]:
