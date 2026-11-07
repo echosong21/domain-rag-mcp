@@ -17,13 +17,29 @@ MCP 2026-07-28 移除了协议级 session，且规定 `tools/list` 不得随连�
 （但可因授权不同而不同）。所以「已披露工具」= 「已授予 scope 的工具」，
 状态按 principal 存。
 
+⚠️ **但实际协商的协议版本是 `2025-11-25`**（FastMCP 4.1.3 的 `initialize`
+返回这个版本，传输层仍走握手与 `Mcp-Session-Id`）。「不按连接存状态」是
+**应用层的设计选择**，不等于「我们在跑 2026-07-28」。两者别混为一谈 ——
+前者我们能决定，后者取决于 SDK 支持到哪一版。
+
 ⚠️ 本 docstring 曾长期停留在「Step 2（披露层已接线）」，与实际代码脱节 ——
 工具与降级/审计都已落地。2026-11-05 按实测更新。
+
+⚠️ **另一处曾经的脱节（2026-11-07 修复）**：审计与指标的实现早就在
+`observability/` 里，但**没有任何一处调用 `record_call`** —— 等于审计从未生效。
+现已由 `_wrap_with_audit` 接线。同一次排查还发现 `create_server()` 本身
+根本起不来（`health_check` 的 `probe: Probe` 让 Pydantic 生成不了 schema），
+而 `--list-tools` 因为不走 `create_server` 一直掩盖着这个问题。
+**教训：`--list-tools` 通过 ≠ server 能启动。** 判断 server 可用性必须真的起一次。
 """
 from __future__ import annotations
 
 import argparse
+import functools
+import inspect
 import sys
+import time
+import uuid
 from pathlib import Path
 
 from fastmcp import FastMCP
@@ -38,12 +54,81 @@ from disclosure import (
     meta_tool_specs,
     search_tools,
 )
+from observability.audit import record_call
 from registry.loader import build_registry
 from registry.models import ToolSpec
 
 ROOT = Path(__file__).resolve().parent
 PROFILES_DIR = ROOT / "profiles"
 DEFAULT_PROFILE = "health-agent"
+
+
+# ── 审计包装 ─────────────────────────────────────────────────
+def _bind_args(fn, args: tuple, kwargs: dict) -> dict | None:
+    """把位置参数与关键字参数还原成「参数名 → 值」。
+
+    审计要记的是「谁用什么参数调了什么」。记成一坨 `args=(...)` 就没法查 ——
+    排查时要能直接看到 `{"domain": "health", "top_k": 3}`。
+    """
+    try:
+        bound = inspect.signature(fn).bind(*args, **kwargs)
+        bound.apply_defaults()
+        return dict(bound.arguments)
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _wrap_with_audit(fn, spec: ToolSpec, principal: str):
+    """给工具调用加计时与审计。
+
+    ⚠️ **必须用 `functools.wraps` 保住签名**：FastMCP 从函数签名生成参数 schema，
+    如果包装器暴露 `*args, **kwargs`，**所有工具的 schema 会变成空对象** ——
+    等于把工具废掉（Agent 看不到该传什么参数）。这是改这里最容易踩的坑。
+
+    ⚠️ **工具内部把错误放在返回值的 `error` 字段里、不抛异常**（本仓一贯约定），
+    所以不能只靠 `except` 判失败 —— 必须在返回值里也查一次。
+    否则审计里所有失败都会记成 `status="ok"`，而「失败不可见」比没有审计更糟。
+    """
+
+    @functools.wraps(fn)
+    def wrapper(*args, **kwargs):
+        t0 = time.perf_counter()
+        trace_id = uuid.uuid4().hex[:16]
+        status, error, result = "ok", None, None
+
+        def _write():
+            record_call(
+                trace_id=trace_id,
+                principal=principal,
+                tool=spec.name,
+                args=_bind_args(fn, args, kwargs),
+                duration_ms=(time.perf_counter() - t0) * 1000,
+                status=status,
+                error=error,
+            )
+
+        try:
+            result = fn(*args, **kwargs)
+        except Exception as exc:  # noqa: BLE001
+            status = "error"
+            error = f"{type(exc).__name__}: {exc}"[:200]
+            _write()
+            raise                       # 异常仍要上抛 —— 审计不是吞错的地方
+
+        # 工具用返回值表达失败，这里必须识别，否则审计全是 ok
+        if isinstance(result, dict):
+            err = result.get("error")
+            if err:
+                status = "error"
+                error = str(err)[:200]
+            elif result.get("blocked"):
+                # 安全拦截不是故障，但也不是成功，单独记一档
+                status = "blocked"
+
+        _write()
+        return result
+
+    return wrapper
 
 
 # ── 工具注解 ─────────────────────────────────────────────────
@@ -88,7 +173,11 @@ def create_server(
             description=spec.brief,
             tags=set(spec.tags) | {spec.scope, spec.batch},
             annotations=_annotations(spec),
-        )(handlers[spec.name])
+        )(
+            # 包装只加计时与审计，不改工具行为。
+            # `functools.wraps` 保住签名 ⇒ FastMCP 仍能生成正确的参数 schema。
+            _wrap_with_audit(handlers[spec.name], spec, profile_name)
+        )
 
     # ② 未授予 scope 的工具立即 disable —— 这是「不可见」的实现
     ungranted = {

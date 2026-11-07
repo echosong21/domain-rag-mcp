@@ -76,15 +76,26 @@ def _normalize(value: object) -> str:
     return text if text in _VALID else STATUS_UNAVAILABLE
 
 
+# 默认探针。测试可替换这个模块级变量以注入假探针。
+#
+# ⚠️ 为什么注入点从「函数参数」改成「模块变量」：
+# `Probe` 是 `Protocol`，Pydantic 无法为它生成 JSON Schema ——
+# 而有参数注解的工具在 `create_server()` 注册时就会让 Pydantic 尝试生成 schema，
+# 于是**整个 server 起不来**（实测抛 `PydanticSchemaGenerationError`）。
+#
+# 更根本的理由：MCP 的 Agent 本来就不该传探针对象。
+# 把测试用的注入点暴露在工具签名上，等于把一个内部实现细节变成协议的一部分。
+_DEFAULT_PROBE: Probe | None = None
+
+
 def health_check(
-    probe: Probe | None = None,
     circuit_states: dict[str, str] | None = None,
 ) -> dict:
     """返回 `{milvus, embedding, rerank, circuit_states, degraded_tools}`。
 
     `circuit_states` 由熔断器在运行时注入（Step 3 接通）；当前默认空字典。
     """
-    p = probe or EnvProbe()
+    p = _DEFAULT_PROBE or EnvProbe()
 
     out: dict[str, object] = {}
     for name in ("milvus", "embedding", "rerank"):
