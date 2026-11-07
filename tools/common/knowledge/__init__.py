@@ -255,3 +255,198 @@ def search(
         "dropped": before - len(hits),
         "stage_ms": {"embed": embed_ms, "search": search_ms},
     }
+
+
+# ════════════════════════════════════════════════════════════
+# 多形态并发召回 + RRF 融合
+# ════════════════════════════════════════════════════════════
+
+# RRF 的平滑常数。取值越大，排名靠后的候选权重越接近，融合越"平"。
+# 60 是原论文的常用默认值。
+RRF_K = 60
+
+
+def _doc_key(doc: dict) -> tuple:
+    """候选块的唯一标识。
+
+    用 `(source, chunk_index)` 而不是 text：两条召回路径都能提供这两个字段，
+    而文本比较代价高。
+    """
+    return (doc.get("source"), doc.get("chunk_index"))
+
+
+def _rrf_fuse(route_docs: dict[str, list[dict]], k: int = RRF_K) -> list[dict]:
+    """Reciprocal Rank Fusion。
+
+    `route_docs`：`{"路名": [候选, ...]}`，每路候选按**该路自己的排序**给出。
+
+    返回融合后的列表（按 RRF 分降序），每项含
+    `key` / `doc` / `score` / `ranks`（这一项在各路里的名次）。
+
+    **`ranks` 是这个函数存在的主要理由**：它让「为什么这条被顶上来」可解释 ——
+    是两路都排第 1，还是只有一路排第 1 而另一路排第 5。没有它，
+    融合结果是个黑盒。
+
+    ⚠️ **不做加权**：本工具的各路是同构的（都是向量检索，只是形态过滤不同），
+    不像 dense/sparse 那样质量不对等。加权要先有「哪一路更可信」的实测依据，
+    没有依据的权重只是把主观臆断写成数字。
+    """
+    scores: dict[tuple, float] = {}
+    ranks: dict[tuple, dict[str, int]] = {}
+    docs: dict[tuple, dict] = {}
+
+    for route, items in route_docs.items():
+        for rank, doc in enumerate(items, start=1):
+            key = _doc_key(doc)
+            scores[key] = scores.get(key, 0.0) + 1.0 / (k + rank)
+            ranks.setdefault(key, {})[route] = rank
+            docs.setdefault(key, doc)
+
+    fused = [
+        {"key": key, "doc": docs[key], "score": round(score, 6), "ranks": ranks[key]}
+        for key, score in scores.items()
+    ]
+    fused.sort(key=lambda x: x["score"], reverse=True)
+    return fused
+
+
+def _retrieve_multi(
+    client, qvec, collection: str, per_form: int,
+    forms: list[str], max_workers: int = 4,
+) -> tuple[dict[str, list[dict]], dict[str, float], float]:
+    """按形态**并发**召回。返回 `(route_docs, per_form_ms, wall_ms)`。
+
+    **为什么并发**：串行时总延迟是各形态的**加和**，并发后接近**最大值**。
+    语义完全不变（仍是每形态各取 per_form 条），只是不再互相等待。
+
+    **失败处理**：单路失败只丢那一路，不炸整体。一个形态的过滤器写错，
+    不该让整个检索不可用 —— 但要在返回里能看出少了一路（缺 key）。
+    """
+    from concurrent.futures import ThreadPoolExecutor
+
+    def one(form: str):
+        t = time.perf_counter()
+        try:
+            hits, _ = _retrieve_one(client, qvec, collection, per_form, form=form)
+            return form, hits, round((time.perf_counter() - t) * 1000, 1)
+        except Exception as exc:  # noqa: BLE001
+            return form, [], round((time.perf_counter() - t) * 1000, 1)
+
+    t0 = time.perf_counter()
+    with ThreadPoolExecutor(max_workers=max_workers) as pool:
+        results = list(pool.map(one, forms))
+    wall_ms = round((time.perf_counter() - t0) * 1000, 1)
+
+    route_docs: dict[str, list[dict]] = {}
+    per_form_ms: dict[str, float] = {}
+    for form, hits, ms in results:
+        route_docs[form] = hits
+        per_form_ms[form] = ms
+    return route_docs, per_form_ms, wall_ms
+
+
+def search_multi(
+    query: str,
+    domain: str | None = None,
+    per_form: int = 2,
+    forms: list[str] | None = None,
+    milvus_url: str | None = None,
+) -> dict:
+    """按数据形态并发召回多路，再用 RRF 融合成统一排序的片段列表。
+
+    **与 `search` 的区别**：`search` 是单路全库检索；本工具把语料按形态
+    （指南/问答/表格/对话）各查一次再融合。适用于「答案可能是表格、但问法像问答」
+    这类跨形态场景 —— 单路检索在这种情况下会漏。
+
+    Args:
+        query: 检索文本。
+        domain: 领域配置名，**必填**。
+        per_form: **每个形态**取几条，1–10（不是总数）。
+        forms: 只查这些形态；默认取配置里声明的全部。
+        milvus_url: 覆盖 `MILVUS_URL`。
+
+    Returns:
+        `{"hits": [...], "n_hits": int, "score_kind": "rrf", "domain": str,
+           "collection": str, "forms": [...], "per_form_ms": {...},
+           "wall_ms": float, "fuse_ms": float, "stage_ms": {...}}`
+        或 `{"error": str}`。
+
+    ⚠️ **`score` 是 RRF 融合分，不是向量相似度**（典型值 0.01–0.05）。
+    不要拿它跟 `min_score` 那类相似度阈值比较 —— 量纲完全不同。
+    所以本工具**刻意不提供 `min_score` 参数**。如果需要按相似度过滤，
+    用 `search`（单路），或者自己按 `hits[].ranks` 判断。
+    """
+    if not isinstance(query, str) or not query.strip():
+        return {"error": "query 不能为空"}
+    if len(query) > 2000:
+        return {"error": f"query 过长（{len(query)} > 2000 字符）"}
+    if not isinstance(per_form, int) or isinstance(per_form, bool):
+        return {"error": "per_form 必须是整数"}
+    if not 1 <= per_form <= 10:
+        return {"error": "per_form 超出范围（1–10）"}
+
+    cfg, err = _load_domain(domain)
+    if err:
+        return {"error": err}
+    collection = cfg["collection"]
+
+    declared = _form_keys(cfg)
+    if forms is None:
+        forms = declared
+    else:
+        unknown = [f for f in forms if f not in declared]
+        if unknown:
+            return {
+                "error": f"未声明的形态：{unknown}，可用：{declared}"
+            }
+        if not forms:
+            return {"error": "forms 不能为空列表"}
+
+    if not forms:
+        return {"error": f"领域 {domain!r} 未声明任何形态（forms）"}
+
+    vec, embed_ms, err = _embed_query(query.strip())
+    if err:
+        return {"error": err}
+
+    if milvus_url:
+        os.environ[ENV_MILVUS_URL] = milvus_url
+    client, err = _milvus_client()
+    if err:
+        return {"error": err}
+
+    try:
+        route_docs, per_form_ms, wall_ms = _retrieve_multi(
+            client, vec, collection, per_form, forms
+        )
+    except Exception as exc:  # noqa: BLE001
+        return {"error": f"多路检索失败：{type(exc).__name__}: {exc}"}
+
+    t0 = time.perf_counter()
+    fused = _rrf_fuse(route_docs)
+    fuse_ms = round((time.perf_counter() - t0) * 1000, 1)
+
+    hits = [
+        {
+            "source": f["doc"].get("source"),
+            "chunk_index": f["doc"].get("chunk_index"),
+            "text": f["doc"].get("text"),
+            "score": f["score"],
+            "ranks": f["ranks"],
+        }
+        for f in fused
+    ]
+
+    return {
+        "hits": hits,
+        "n_hits": len(hits),
+        # 显式声明分数语义，避免调用方把它当相似度用
+        "score_kind": "rrf",
+        "domain": cfg.get("domain", {}).get("key") or domain,
+        "collection": collection,
+        "forms": forms,
+        "per_form_ms": per_form_ms,
+        "wall_ms": wall_ms,
+        "fuse_ms": fuse_ms,
+        "stage_ms": {"embed": embed_ms, "wall": wall_ms, "fuse": fuse_ms},
+    }

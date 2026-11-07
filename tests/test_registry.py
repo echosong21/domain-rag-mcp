@@ -50,7 +50,8 @@ def test_real_registry_loads():
     # 精确数量是**有意的摩擦**：加/删工具时必须来改这一行，
     # 等于强制一次「我确实要增删」的确认。改成「>= N」会失去这个作用。
     # 变更记录：7 → 8（2026-11-07 新增 common.knowledge.search）
-    assert len(registry.tools) == 8
+    #           8 → 9（2026-11-07 新增 common.knowledge.search_multi）
+    assert len(registry.tools) == 9
     assert "common.discovery.list_domains" in registry.tools
     assert "common.discovery.health_check" in registry.tools
     # handler 必须真能解析到可调用对象

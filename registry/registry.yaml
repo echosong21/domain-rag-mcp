@@ -60,6 +60,23 @@ tools:
     requires: [milvus, embedding]
     batch: core
 
+  # ── 检索：多形态并发 + RRF 融合 ──────────────────────────
+  #
+  # 解决「答案在表格，问法像问答」这类跨形态漏召回。
+  #
+  # ⚠️ 它的 `score` 是 RRF 融合分（典型 0.01–0.05），**不是向量相似度**。
+  #    所以它刻意不提供 min_score 参数 —— 拿相似度阈值过滤 RRF 分会得到空结果，
+  #    而且这种错很难看出来（工具返回 0 条，看起来像"确实没有"）。
+  - name: common.knowledge.search_multi
+    module: tools.common.knowledge
+    handler: search_multi
+    brief: 按数据形态并发召回多路再 RRF 融合，返回统一排序的片段列表（不生成回答）
+    scope: common.knowledge
+    tags: [多路, 融合, 并发, multi, fuse, rrf, hybrid, 形态, form]
+    side_effect: read
+    requires: [milvus, embedding]
+    batch: core
+
   # ── 运维：索引状态（只读）────────────────────────────────
   - name: common.ops.get_index_status
     module: tools.common.ops

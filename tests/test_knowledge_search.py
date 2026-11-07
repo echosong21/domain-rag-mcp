@@ -250,3 +250,171 @@ def test_form_keys_preserves_config_order():
 def test_form_keys_skips_malformed_entries():
     cfg = {"forms": [{"key": "guides"}, {"nokey": 1}, "string", {"key": "faq"}]}
     assert knowledge._form_keys(cfg) == ["guides", "faq"]
+
+
+# ════════════════════════════════════════════════════════════
+# search_multi：多路并发 + RRF 融合
+# ════════════════════════════════════════════════════════════
+
+# ── 参数校验 ────────────────────────────────────────────────
+@pytest.mark.parametrize(
+    ("kwargs", "fragment"),
+    [
+        ({"query": ""}, "query 不能为空"),
+        ({"query": "ok", "per_form": 0}, "per_form 超出范围"),
+        ({"query": "ok", "per_form": 11}, "per_form 超出范围"),
+        ({"query": "ok", "per_form": "2"}, "per_form 必须是整数"),
+        ({"query": "ok", "forms": []}, "forms 不能为空"),
+    ],
+    ids=["empty", "per-form-zero", "per-form-over", "per-form-str", "forms-empty"],
+)
+def test_search_multi_param_validation(domains_dir, kwargs, fragment):
+    out = knowledge.search_multi(domain="health", **kwargs)
+    assert "error" in out
+    assert fragment in out["error"]
+
+
+def test_search_multi_rejects_undeclared_form(domains_dir):
+    """查一个配置里没声明的形态时，要列出可用的。"""
+    out = knowledge.search_multi(query="ok", domain="health", forms=["nope"])
+    assert "未声明的形态" in out["error"]
+    assert "guides" in out["error"]
+
+
+# ── 纯函数：RRF 融合的数学正确性 ────────────────────────────
+def _doc(src: str, idx: int) -> dict:
+    return {"source": src, "chunk_index": idx, "text": f"{src}#{idx}"}
+
+
+def test_rrf_scores_two_routes_first_place_double():
+    """两路都排第 1 的候选，得分应是单路第 1 的两倍。
+
+    这是 RRF 的定义：分数 = Σ 1/(k+rank)。没这条断言，公式写错也测不出来。
+    """
+    d = _doc("a.md", 0)
+    fused = knowledge._rrf_fuse({"guides": [d], "faq": [d]})
+
+    assert len(fused) == 1
+    expected = 2.0 / (knowledge.RRF_K + 1)
+    assert abs(fused[0]["score"] - round(expected, 6)) < 1e-9
+    assert fused[0]["ranks"] == {"guides": 1, "faq": 1}
+
+
+def test_rrf_single_route_gets_half_the_score():
+    """同一候选只在一条路里出现时，得分是双路的一半。"""
+    d = _doc("a.md", 0)
+    one_route = knowledge._rrf_fuse({"guides": [d]})
+    two_routes = knowledge._rrf_fuse({"guides": [d], "faq": [d]})
+
+    assert abs(two_routes[0]["score"] - 2 * one_route[0]["score"]) < 1e-6
+
+
+def test_rrf_prefers_consensus_over_single_route_top():
+    """两路都排第 2 的，应该压过只有一路排第 1 的。
+
+    这就是 RRF 的核心价值：**多路共识优于单路激进**。
+    """
+    consensus = _doc("both.md", 0)
+    lone = _doc("only.md", 0)
+
+    fused = knowledge._rrf_fuse(
+        {
+            "guides": [lone, consensus],   # lone 第 1，consensus 第 2
+            "faq": [consensus],            # consensus 只有这一路第 1
+        }
+    )
+    # consensus = 1/(60+2) + 1/(60+1) ≈ 0.03252
+    # lone      = 1/(60+1)            ≈ 0.01639
+    assert fused[0]["key"] == ("both.md", 0)
+    assert fused[0]["score"] > fused[1]["score"]
+
+
+def test_rrf_ranks_record_each_route():
+    """`ranks` 必须逐路记录名次 —— 它让「谁把这条顶上来」可解释。"""
+    a, b = _doc("a.md", 0), _doc("b.md", 0)
+    fused = knowledge._rrf_fuse(
+        {"guides": [a, b], "faq": [b, a]}
+    )
+    by_key = {f["key"]: f for f in fused}
+
+    assert by_key[("a.md", 0)]["ranks"] == {"guides": 1, "faq": 2}
+    assert by_key[("b.md", 0)]["ranks"] == {"guides": 2, "faq": 1}
+    # 两条得分相同（名次互换），顺序由稳定排序决定，不断言先后
+
+
+def test_rrf_empty_routes_returns_empty():
+    assert knowledge._rrf_fuse({}) == []
+    assert knowledge._rrf_fuse({"guides": [], "faq": []}) == []
+
+
+def test_doc_key_uses_source_and_chunk_index():
+    """同一块在不同路的文本可能相同，但必须靠 (source, chunk_index) 判等。"""
+    assert knowledge._doc_key({"source": "a.md", "chunk_index": 3}) == ("a.md", 3)
+
+
+# ── 编排逻辑（打桩后端）─────────────────────────────────────
+@pytest.fixture
+def stub_multi(monkeypatch):
+    """打桩：两路各返回一批，验证融合与并发编排。"""
+    monkeypatch.setattr(
+        knowledge, "_embed_query", lambda q: ([0.1, 0.2], 4.0, None)
+    )
+    monkeypatch.setenv(knowledge.ENV_MILVUS_URL, "http://stub")
+    monkeypatch.setattr(knowledge, "_milvus_client", lambda: (object(), None))
+
+    captured: dict = {}
+
+    def fake_multi(client, qvec, collection, per_form, forms, max_workers=4):
+        captured.update(
+            collection=collection, per_form=per_form, forms=forms
+        )
+        route_docs = {
+            "guides": [
+                {"score": 0.9, "source": "guides/x.md", "chunk_index": 0, "text": "g0"},
+                {"score": 0.8, "source": "guides/y.md", "chunk_index": 0, "text": "g1"},
+            ],
+            "faq": [
+                {"score": 0.7, "source": "guides/x.md", "chunk_index": 0, "text": "g0"},
+                {"score": 0.6, "source": "faq/z.md", "chunk_index": 0, "text": "f0"},
+            ],
+        }
+        return route_docs, {"guides": 11.0, "faq": 13.0}, 15.5
+
+    monkeypatch.setattr(knowledge, "_retrieve_multi", fake_multi)
+    return captured
+
+
+def test_search_multi_fuses_and_reports_timings(domains_dir, stub_multi):
+    out = knowledge.search_multi(query="ok", domain="health", per_form=2)
+
+    assert "error" not in out
+    assert out["n_hits"] == 3          # guides/x 被两路命中，合并后去重
+    assert out["score_kind"] == "rrf"  # 分数语义必须显式声明
+    assert out["forms"] == ["guides", "faq"]
+
+    # guides/x 两路都在 ⇒ 应该是第一名
+    assert out["hits"][0]["source"] == "guides/x.md"
+    assert out["hits"][0]["ranks"] == {"guides": 1, "faq": 1}
+
+    # 并发与分路计时都要有
+    assert out["per_form_ms"] == {"guides": 11.0, "faq": 13.0}
+    assert out["wall_ms"] == 15.5
+    assert "fuse_ms" in out
+    assert out["stage_ms"]["embed"] == 4.0
+
+
+def test_search_multi_respects_explicit_forms(domains_dir, stub_multi):
+    out = knowledge.search_multi(
+        query="ok", domain="health", forms=["guides"]
+    )
+    assert out["forms"] == ["guides"]
+    assert stub_multi["forms"] == ["guides"]
+
+
+def test_search_multi_failure_is_reported_not_raised(domains_dir, stub_multi, monkeypatch):
+    def boom(*args, **kwargs):
+        raise RuntimeError("all routes down")
+
+    monkeypatch.setattr(knowledge, "_retrieve_multi", boom)
+    out = knowledge.search_multi(query="ok", domain="health")
+    assert "多路检索失败" in out["error"]
