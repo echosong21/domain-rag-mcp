@@ -147,10 +147,22 @@ python server.py --profile health-agent --list-tools
 
 ### 工具清单
 
-**当前注册 7 个工具**，外加 2 个元工具（`meta.search_tools` / `meta.enable_tool`）。
+**当前注册 8 个工具**，外加 2 个元工具（`meta.search_tools` / `meta.enable_tool`）。
 
 **具体有哪些，见 [`registry/registry.yaml`](registry/registry.yaml)** —— 不在 README
 里重复维护一份，否则每加一个工具就要改两处，必然会漂移。
+
+**按 scope 分布**（`--list-tools` 可实测）：
+
+| scope | 工具数 | health-agent 是否可见 |
+|---|:--:|:--:|
+| `common.discovery` | 2 | ✅ |
+| `common.knowledge` | 1 | ✅ |
+| `common.safety` | 3 | ✅ |
+| `common.ops.read` | 1 | ✅ |
+| `common.ops.write` | 1 | ❌ **不可见** |
+
+**⇒ health-agent 可见 7/8，dev-agent 可见 8/8。** 差的那一个是重建索引。
 
 ---
 

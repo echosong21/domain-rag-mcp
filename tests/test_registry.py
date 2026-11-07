@@ -47,12 +47,34 @@ def test_real_registry_loads():
     """仓库里的 registry.yaml 必须能加载，且有 2 个核心工具。"""
     registry, handlers = build_registry()
 
-    assert len(registry.tools) == 7
+    # 精确数量是**有意的摩擦**：加/删工具时必须来改这一行，
+    # 等于强制一次「我确实要增删」的确认。改成「>= N」会失去这个作用。
+    # 变更记录：7 → 8（2026-11-07 新增 common.knowledge.search）
+    assert len(registry.tools) == 8
     assert "common.discovery.list_domains" in registry.tools
     assert "common.discovery.health_check" in registry.tools
     # handler 必须真能解析到可调用对象
     assert set(handlers) == set(registry.tools)
     assert all(callable(fn) for fn in handlers.values())
+
+
+def test_business_scopes_have_tools():
+    """业务类 scope 不能声明了却空着。
+
+    `common.knowledge` 曾长期挂在 scopes 里却一个工具都没有 —— 一个 RAG 服务
+    没有「检索」工具是明显缺口，而且这种「声明了但空着」的状态不会报错，
+    只会让人误以为能力已存在。
+
+    ⚠️ 只查 `common.*`：`dev.eval` / `dev.feedback` 是**有意留白**的
+    （开发期能力，工具待建）。留白必须能被解释，所以这里不写「允许任意空」，
+    而是明确限定范围 —— 否则「声明了但空着」会悄悄累积。
+    """
+    specs, scopes = load_specs()
+    used = {s.scope for s in specs}
+    empty_business = {s for s in scopes if s.startswith("common.")} - used
+    assert not empty_business, (
+        f"业务 scope 声明了但没有工具：{sorted(empty_business)}"
+    )
 
 
 def test_scopes_declared():

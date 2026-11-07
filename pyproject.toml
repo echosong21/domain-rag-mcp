@@ -10,10 +10,22 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = ["pytest>=8.0"]
+# 检索类工具（common.knowledge.*）需要这两个。**不放进主依赖**：
+# 只想测披露逻辑 / 权限矩阵的人不该被迫装一整套检索栈。
+# 装法：pip install -e ".[retrieval]"
+retrieval = [
+    "pymilvus>=3.0",
+    "langchain-openai>=1.6",
+]
 
 # ⚠️ 刻意不在这里声明 milvus / langchain 等重型依赖 —— 
 # 工具层通过 `requires` 字段声明需要哪些能力，
 # 由部署环境按需安装。否则「只想测披露逻辑」的人也得装一整套检索栈。
+#
+# 落地方式（2026-11-07 定）：**函数内导入 + extras 声明**并用。
+# 工具模块里 `from pymilvus import MilvusClient` 写在函数体内，
+# 这样模块本身与它的测试在没装检索栈时也能导入；
+# 而 extras 保证需要时一行装齐。
 
 [tool.pytest.ini_options]
 pythonpath = ["."]

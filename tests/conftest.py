@@ -34,7 +34,13 @@ TMP_ROOT = ROOT / ".test_tmp"
 @pytest.fixture
 def tmp_path(request) -> Path:
     """每个用例一个独立目录，落在仓库内的 `.test_tmp/`（已在 .gitignore）。"""
-    safe_name = request.node.name.replace("/", "_").replace("::", "_")
+    # ⚠️ 必须清洗非法路径字符，否则含中文的用例名会崩：
+    # pytest 把非 ASCII 转义成 `\u8d85` 形式，而**反斜杠在 Windows 路径里是
+    # 分隔符** ⇒ mkdir 报 FileNotFoundError: [WinError 3]（2026-11-07 实误）。
+    # 除 `\` 外，其余 Windows 保留字符（: * ? " < > |）也一并替换。
+    safe_name = request.node.name
+    for ch in '\\/:*?"<>|':
+        safe_name = safe_name.replace(ch, "_")
     path = TMP_ROOT / safe_name
     shutil.rmtree(path, ignore_errors=True)
     path.mkdir(parents=True, exist_ok=True)

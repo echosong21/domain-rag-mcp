@@ -42,6 +42,24 @@ tools:
     requires: [milvus, embedding]
     batch: core
 
+  # ── 检索：单路向量召回 ────────────────────────────────────
+  #
+  # ⚠️ `common.knowledge` 这个 scope 长期是空的 —— 一个 RAG 服务没有「检索」工具
+  #    是明显缺口。它补的就是这个洞。
+  #
+  # ⚠️ 它**不生成回答**：只返回带来源的片段。生成要另开工具，因为生成贵得多
+  #    （实测同一链路上检索约 350ms、生成可达 16 秒），
+  #    只做检索就能满足需求的调用方不该被迫付生成的钱。
+  - name: common.knowledge.search
+    module: tools.common.knowledge
+    handler: search
+    brief: 在指定领域做单路向量检索，返回带来源的片段列表（不生成回答）
+    scope: common.knowledge
+    tags: [检索, 召回, 搜索, search, retrieve, recall, vector, 片段, chunk]
+    side_effect: read
+    requires: [milvus, embedding]
+    batch: core
+
   # ── 运维：索引状态（只读）────────────────────────────────
   - name: common.ops.get_index_status
     module: tools.common.ops
