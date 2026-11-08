@@ -192,7 +192,7 @@ def stub_backend(monkeypatch):
             12.3,
         )
 
-    monkeypatch.setattr(knowledge, "_retrieve_one", fake_retrieve)
+    monkeypatch.setattr(knowledge, "retrieve_single", fake_retrieve)
     return captured
 
 
@@ -232,7 +232,7 @@ def test_search_failure_is_reported_not_raised(domains_dir, stub_backend, monkey
     def boom(*args, **kwargs):
         raise RuntimeError("collection not loaded")
 
-    monkeypatch.setattr(knowledge, "_retrieve_one", boom)
+    monkeypatch.setattr(knowledge, "retrieve_single", boom)
     out = knowledge.search(query="ok", domain="health")
     assert "Milvus 检索失败" in out["error"]
     assert "collection not loaded" in out["error"]
@@ -247,7 +247,7 @@ def test_to_raw_maps_milvus_hit_shape():
             "entity": {"text": "正文", "source": "guides/x.md", "chunk_index": 7},
         }
     ]
-    out = knowledge._to_raw(hits)
+    out = knowledge.to_raw(hits)
     assert out == [
         {"score": 0.8765, "source": "guides/x.md", "chunk_index": 7, "text": "正文"}
     ]
@@ -310,7 +310,7 @@ def test_rrf_scores_two_routes_first_place_double():
     这是 RRF 的定义：分数 = Σ 1/(k+rank)。没这条断言，公式写错也测不出来。
     """
     d = _doc("a.md", 0)
-    fused = knowledge._rrf_fuse({"guides": [d], "faq": [d]})
+    fused = knowledge.rrf_fuse({"guides": [d], "faq": [d]})
 
     assert len(fused) == 1
     expected = 2.0 / (knowledge.RRF_K + 1)
@@ -321,8 +321,8 @@ def test_rrf_scores_two_routes_first_place_double():
 def test_rrf_single_route_gets_half_the_score():
     """同一候选只在一条路里出现时，得分是双路的一半。"""
     d = _doc("a.md", 0)
-    one_route = knowledge._rrf_fuse({"guides": [d]})
-    two_routes = knowledge._rrf_fuse({"guides": [d], "faq": [d]})
+    one_route = knowledge.rrf_fuse({"guides": [d]})
+    two_routes = knowledge.rrf_fuse({"guides": [d], "faq": [d]})
 
     assert abs(two_routes[0]["score"] - 2 * one_route[0]["score"]) < 1e-6
 
@@ -335,7 +335,7 @@ def test_rrf_prefers_consensus_over_single_route_top():
     consensus = _doc("both.md", 0)
     lone = _doc("only.md", 0)
 
-    fused = knowledge._rrf_fuse(
+    fused = knowledge.rrf_fuse(
         {
             "guides": [lone, consensus],   # lone 第 1，consensus 第 2
             "faq": [consensus],            # consensus 只有这一路第 1
@@ -350,7 +350,7 @@ def test_rrf_prefers_consensus_over_single_route_top():
 def test_rrf_ranks_record_each_route():
     """`ranks` 必须逐路记录名次 —— 它让「谁把这条顶上来」可解释。"""
     a, b = _doc("a.md", 0), _doc("b.md", 0)
-    fused = knowledge._rrf_fuse(
+    fused = knowledge.rrf_fuse(
         {"guides": [a, b], "faq": [b, a]}
     )
     by_key = {f["key"]: f for f in fused}
@@ -361,13 +361,13 @@ def test_rrf_ranks_record_each_route():
 
 
 def test_rrf_empty_routes_returns_empty():
-    assert knowledge._rrf_fuse({}) == []
-    assert knowledge._rrf_fuse({"guides": [], "faq": []}) == []
+    assert knowledge.rrf_fuse({}) == []
+    assert knowledge.rrf_fuse({"guides": [], "faq": []}) == []
 
 
 def test_doc_key_uses_source_and_chunk_index():
     """同一块在不同路的文本可能相同，但必须靠 (source, chunk_index) 判等。"""
-    assert knowledge._doc_key({"source": "a.md", "chunk_index": 3}) == ("a.md", 3)
+    assert knowledge.doc_key({"source": "a.md", "chunk_index": 3}) == ("a.md", 3)
 
 
 # ── 编排逻辑（打桩后端）─────────────────────────────────────
@@ -382,7 +382,7 @@ def stub_multi(monkeypatch):
 
     captured: dict = {}
 
-    def fake_multi(client, qvec, collection, per_form, forms, max_workers=4):
+    def fake_multi(client, qvec, collection, per_form, forms, max_workers=4, on_error="raise"):
         captured.update(
             collection=collection, per_form=per_form, forms=forms
         )
@@ -398,7 +398,7 @@ def stub_multi(monkeypatch):
         }
         return route_docs, {"guides": 11.0, "faq": 13.0}, 15.5
 
-    monkeypatch.setattr(knowledge, "_retrieve_multi", fake_multi)
+    monkeypatch.setattr(knowledge, "retrieve_multi", fake_multi)
     return captured
 
 
@@ -433,6 +433,6 @@ def test_search_multi_failure_is_reported_not_raised(domains_dir, stub_multi, mo
     def boom(*args, **kwargs):
         raise RuntimeError("all routes down")
 
-    monkeypatch.setattr(knowledge, "_retrieve_multi", boom)
+    monkeypatch.setattr(knowledge, "retrieve_multi", boom)
     out = knowledge.search_multi(query="ok", domain="health")
     assert "多路检索失败" in out["error"]

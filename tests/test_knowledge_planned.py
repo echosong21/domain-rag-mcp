@@ -247,7 +247,7 @@ def stub_multi_retrieve(monkeypatch):
     monkeypatch.setenv(knowledge.ENV_MILVUS_URL, "http://stub")
     monkeypatch.setattr(knowledge, "_milvus_client", lambda: (object(), None))
 
-    def fake(client, qvec, collection, per_form, forms, max_workers=4):
+    def fake(client, qvec, collection, per_form, forms, max_workers=4, on_error="raise"):
         docs = {
             "guides": [_hit("g0", "guides/x.md", 0), _hit("g1", "guides/y.md", 1)],
             "faq": [_hit("f0", "faq/z.md", 0)],
@@ -256,7 +256,7 @@ def stub_multi_retrieve(monkeypatch):
             docs.setdefault(f, [])
         return docs, {f: 10.0 for f in forms}, 12.0
 
-    monkeypatch.setattr(knowledge, "_retrieve_multi", fake)
+    monkeypatch.setattr(knowledge, "retrieve_multi", fake)
     return fake
 
 

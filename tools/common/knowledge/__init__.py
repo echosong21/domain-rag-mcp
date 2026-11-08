@@ -14,18 +14,28 @@
 **正确的依赖方向**：工具层直接连基础设施（Milvus / embedding 端点），
 领域差异通过 `domains/*.yaml` 配置注入，代码里不出现任何具体领域名。
 
-**复用策略：复制纯函数，不复制业务编排**
+**复用策略：原语走公共库，编排留在这里**
 
-`_to_raw` 与 `_retrieve_one` 是从同生态检索仓**复制**的（截至 2026-11-07）。
-之所以是复制而不是抽公共库：
+检索的**原语**（命中摊平 / 单路召回 / 多形态并发召回 / RRF 融合）已抽成独立的
+`domain-rag-core` 包，本模块 `from domain_rag_core import ...`。
 
-1. 这两个是**依赖注入的纯函数**（client / qvec 都由调用方给），没有状态
-2. 检索仓那边的另一半是**业务编排**（检索→融合→生成→安全闸→trace），
-   工具层不需要那部分，也不需要跟着它一起演进
-3. 抽库要先动检索仓，而它有 109 个测试 —— 为当前目标不值得
+**这一段曾经是"刻意复制"的**，当时的判断是：
 
-**什么时候该改成抽公共库**：当第三个地方也要用「多形态并发召回 + RRF 融合」
-这段逻辑时（那部分有 33 + 40 行，重复的代价开始超过抽库的成本）。
+1. 那几行是**依赖注入的纯函数**（client / qvec 都由调用方给），没有状态
+2. 检索业务仓的另一半是**业务编排**（检索→融合→生成→安全闸→trace），
+   工具层不需要，也不该跟着它一起演进
+3. 抽库要先动业务仓，而它有 109 个测试 —— 为当时的目标不值得
+
+**改成抽库的触发条件当时就写下了**：「当第三个地方也要用『多形态并发召回 + RRF 融合』
+这段逻辑时」。**现在正是那个时候** —— 于是抽了，理由和代价都兑现了：
+
+- 抽取时**发现了三处真实语义差异**（单路是否支持形态过滤、多路返回分组还是扁平、
+  单路失败是丢还是抛）。三处都是两套实现各自演化出来的，**不抽就永远发现不了**
+- 差异的解法不是"统一成一种"，而是**让原语支持两种策略，由调用方选**：
+  `retrieve_single(..., form=...)`、`retrieve_multi(..., on_error="raise"|"skip")`
+
+**本模块保留的是编排**：领域配置加载、参数校验、结果整形、工具层的错误契约。
+这些不该进公共库 —— 它们回答的是「作为 MCP 工具该怎么表现」，与算法无关。
 """
 from __future__ import annotations
 
@@ -34,6 +44,15 @@ import time
 from pathlib import Path
 
 import yaml
+
+from domain_rag_core import (
+    RRF_K,
+    doc_key,
+    retrieve_multi,
+    retrieve_single,
+    rrf_fuse,
+    to_raw,
+)
 
 ENV_DOMAINS_DIR = "DOMAIN_RAG_DOMAINS_DIR"
 ENV_MILVUS_URL = "MILVUS_URL"
@@ -112,35 +131,18 @@ def _form_keys(cfg: dict) -> list[str]:
     ]
 
 
-# ── 检索原语（复制自检索仓，纯函数）────────────────────────
-def _to_raw(hits: list) -> list[dict]:
-    """把 Milvus 命中统一成内部结构。"""
-    return [
-        {
-            "score": round(h["distance"], 4),
-            "source": h["entity"]["source"],
-            "chunk_index": h["entity"]["chunk_index"],
-            "text": h["entity"]["text"],
-        }
-        for h in hits
-    ]
-
-
-def _retrieve_one(client, qvec, collection: str, top_k: int,
-                  form: str | None = None) -> tuple[list[dict], float]:
-    """单次向量检索，可选按形态过滤。返回 `(hits, elapsed_ms)`。"""
-    t0 = time.perf_counter()
-    kwargs = {
-        "collection_name": collection,
-        "data": [qvec],
-        "limit": top_k,
-        "output_fields": ["text", "source", "chunk_index"],
-    }
-    if form:
-        kwargs["filter"] = f'source like "{form}/%"'
-
-    hits = client.search(**kwargs)[0]
-    return _to_raw(hits), round((time.perf_counter() - t0) * 1000, 1)
+# ── 检索原语：来自 domain-rag-core ─────────────────────────
+#
+# 这里曾经有 `_to_raw` / `_retrieve_one` / `_retrieve_multi` / `_doc_key` / `_rrf_fuse`
+# 五份本地实现（从业务仓复制的）。已全部移除，改为 import 公共库。
+#
+# 保留这一行注释是为了让后来的人知道：**这些名字还在被引用，但定义不在这里**。
+# 名字映射：
+#   _to_raw         → to_raw
+#   _retrieve_one   → retrieve_single（form 参数同名）
+#   _retrieve_multi → retrieve_multi（返回分组；本仓调用时传 on_error="skip"）
+#   _doc_key        → doc_key
+#   _rrf_fuse       → rrf_fuse
 
 
 # ── 能力探针与后端 ──────────────────────────────────────────
@@ -254,7 +256,7 @@ def search(
         return {"error": err}
 
     try:
-        hits, search_ms = _retrieve_one(client, vec, collection, top_k)
+        hits, search_ms = retrieve_single(client, vec, collection, top_k)
     except Exception as exc:  # noqa: BLE001
         return {"error": f"Milvus 检索失败：{type(exc).__name__}: {exc}"}
 
@@ -281,85 +283,6 @@ def search(
 # RRF 的平滑常数。取值越大，排名靠后的候选权重越接近，融合越"平"。
 # 60 是原论文的常用默认值。
 RRF_K = 60
-
-
-def _doc_key(doc: dict) -> tuple:
-    """候选块的唯一标识。
-
-    用 `(source, chunk_index)` 而不是 text：两条召回路径都能提供这两个字段，
-    而文本比较代价高。
-    """
-    return (doc.get("source"), doc.get("chunk_index"))
-
-
-def _rrf_fuse(route_docs: dict[str, list[dict]], k: int = RRF_K) -> list[dict]:
-    """Reciprocal Rank Fusion。
-
-    `route_docs`：`{"路名": [候选, ...]}`，每路候选按**该路自己的排序**给出。
-
-    返回融合后的列表（按 RRF 分降序），每项含
-    `key` / `doc` / `score` / `ranks`（这一项在各路里的名次）。
-
-    **`ranks` 是这个函数存在的主要理由**：它让「为什么这条被顶上来」可解释 ——
-    是两路都排第 1，还是只有一路排第 1 而另一路排第 5。没有它，
-    融合结果是个黑盒。
-
-    ⚠️ **不做加权**：本工具的各路是同构的（都是向量检索，只是形态过滤不同），
-    不像 dense/sparse 那样质量不对等。加权要先有「哪一路更可信」的实测依据，
-    没有依据的权重只是把主观臆断写成数字。
-    """
-    scores: dict[tuple, float] = {}
-    ranks: dict[tuple, dict[str, int]] = {}
-    docs: dict[tuple, dict] = {}
-
-    for route, items in route_docs.items():
-        for rank, doc in enumerate(items, start=1):
-            key = _doc_key(doc)
-            scores[key] = scores.get(key, 0.0) + 1.0 / (k + rank)
-            ranks.setdefault(key, {})[route] = rank
-            docs.setdefault(key, doc)
-
-    fused = [
-        {"key": key, "doc": docs[key], "score": round(score, 6), "ranks": ranks[key]}
-        for key, score in scores.items()
-    ]
-    fused.sort(key=lambda x: x["score"], reverse=True)
-    return fused
-
-
-def _retrieve_multi(
-    client, qvec, collection: str, per_form: int,
-    forms: list[str], max_workers: int = 4,
-) -> tuple[dict[str, list[dict]], dict[str, float], float]:
-    """按形态**并发**召回。返回 `(route_docs, per_form_ms, wall_ms)`。
-
-    **为什么并发**：串行时总延迟是各形态的**加和**，并发后接近**最大值**。
-    语义完全不变（仍是每形态各取 per_form 条），只是不再互相等待。
-
-    **失败处理**：单路失败只丢那一路，不炸整体。一个形态的过滤器写错，
-    不该让整个检索不可用 —— 但要在返回里能看出少了一路（缺 key）。
-    """
-    from concurrent.futures import ThreadPoolExecutor
-
-    def one(form: str):
-        t = time.perf_counter()
-        try:
-            hits, _ = _retrieve_one(client, qvec, collection, per_form, form=form)
-            return form, hits, round((time.perf_counter() - t) * 1000, 1)
-        except Exception as exc:  # noqa: BLE001
-            return form, [], round((time.perf_counter() - t) * 1000, 1)
-
-    t0 = time.perf_counter()
-    with ThreadPoolExecutor(max_workers=max_workers) as pool:
-        results = list(pool.map(one, forms))
-    wall_ms = round((time.perf_counter() - t0) * 1000, 1)
-
-    route_docs: dict[str, list[dict]] = {}
-    per_form_ms: dict[str, float] = {}
-    for form, hits, ms in results:
-        route_docs[form] = hits
-        per_form_ms[form] = ms
-    return route_docs, per_form_ms, wall_ms
 
 
 def search_multi(
@@ -433,14 +356,14 @@ def search_multi(
         return {"error": err}
 
     try:
-        route_docs, per_form_ms, wall_ms = _retrieve_multi(
-            client, vec, collection, per_form, forms
+        route_docs, per_form_ms, wall_ms = retrieve_multi(
+            client, vec, collection, per_form, forms, on_error="skip"
         )
     except Exception as exc:  # noqa: BLE001
         return {"error": f"多路检索失败：{type(exc).__name__}: {exc}"}
 
     t0 = time.perf_counter()
-    fused = _rrf_fuse(route_docs)
+    fused = rrf_fuse(route_docs)
     fuse_ms = round((time.perf_counter() - t0) * 1000, 1)
 
     hits = [
@@ -849,7 +772,7 @@ def answer_planned(
 
     # ② RRF 融合（复用多形态那套）。单子任务时融合等于原样，
     #    不额外分支 —— 少一条分支就少一处只在特定输入下才走的代码。
-    fused = _rrf_fuse(route_docs)
+    fused = rrf_fuse(route_docs)
     hits = [
         {
             "source": f["doc"].get("source"),
@@ -969,8 +892,8 @@ def explain(
             return {"error": err}
 
         try:
-            docs, per_form_ms, wall_ms = _retrieve_multi(
-                client, vec, cfg["collection"], per_form, forms
+            docs, per_form_ms, wall_ms = retrieve_multi(
+                client, vec, cfg["collection"], per_form, forms, on_error="skip"
             )
         except Exception as exc:  # noqa: BLE001
             return {"error": f"检索失败：{type(exc).__name__}: {exc}"}
@@ -987,7 +910,7 @@ def explain(
         for form, items in docs.items():
             route_docs[f"{st}@{form}" if len(subtasks) > 1 else form] = items
 
-    fused = _rrf_fuse(route_docs)
+    fused = rrf_fuse(route_docs)
     fused_out = [
         {
             "source": f["doc"].get("source"),
