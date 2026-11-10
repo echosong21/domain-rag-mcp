@@ -132,6 +132,36 @@ python server.py --profile dev-agent   --list-tools
 
 ## 五、快速开始
 
+### ⚠️ 先装一个不在 PyPI 上的依赖
+
+检索类工具的原语（命中摊平、单路/多路召回、RRF 融合）来自一个独立包
+`domain-rag-core`。**它是硬依赖** —— 不装它，本仓连 import 都过不去：
+
+```bash
+# 假设 domain-rag-core 与本仓同级
+pip install -e ../domain-rag-core
+```
+
+验证：
+
+```bash
+python -c "import domain_rag_core; print(domain_rag_core.__version__)"
+```
+
+**⚠️ 这个包没有发布到 PyPI，也不在本仓内。** 只 clone 本仓会看到：
+
+```bash
+python -c "from tools.common import knowledge"
+# ModuleNotFoundError: No module named 'domain_rag_core'
+```
+
+**⇒ 这不是代码缺陷，是缺了一个依赖。**
+
+**为什么不 vendored 进本仓**：那样就回到「两份副本」—— 同一个 `to_raw` 在两个仓里
+各有一份，然后各自演化。抽取时正是发现了三处已经分叉的语义
+（单路是否支持形态过滤、多路返回分组还是扁平、单路失败是丢还是抛），
+所以这次的结论是「在同一处定义」，而不是「复制一份更省事」。
+
 ### 安装
 
 ```bash
@@ -146,6 +176,10 @@ pip install -e ".[dev]"
 ```bash
 pip install -e ".[retrieval]"
 ```
+
+`domain-rag-core` 本身**零运行时依赖**（它不 import pymilvus / langchain），
+但它提供的召回函数需要你传进一个 Milvus client —— 所以真正要用检索，
+`[retrieval]` 那组还是得装。
 
 依赖引入方式是**函数内导入 + extras 声明**：工具模块里 `from pymilvus import ...`
 写在函数体内，所以模块与它的测试在没装检索栈时也能导入。
